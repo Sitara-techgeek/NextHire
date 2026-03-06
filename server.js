@@ -43,6 +43,11 @@ const upload = multer({
     }
 });
 
+// ─── Serve Frontend ─────────────────────────────────────────
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'NextHire.html'));
+});
+
 // ─── Health Check ────────────────────────────────────────────
 app.get('/health', (req, res) => {
     res.json({ status: 'OK', message: 'NextHire backend is running!' });
