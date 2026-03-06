@@ -1,8 +1,7 @@
 // ============================================
-// NextHire Backend Server
+// NextHire Combined Backend Server
+// Supports both Text-Based and Live Interview
 // ============================================
-// This server handles API calls to Groq and Deepgram
-// keeping your API keys secure server-side
 
 const express = require('express');
 const cors = require('cors');
@@ -22,57 +21,40 @@ try {
     process.exit(1);
 }
 
-// Initialize Express app
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Initialize Groq client
-const groq = new Groq({
-    apiKey: CONFIG.GROQ_API_KEY
-});
+const groq = new Groq({ apiKey: CONFIG.GROQ_API_KEY });
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 app.use(express.static('.'));
 
-// Configure file upload
 const upload = multer({
     dest: 'uploads/',
-    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+    limits: { fileSize: 10 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
-        const allowedTypes = /pdf|doc|docx|txt/;
+        const allowedTypes = /pdf|doc|docx|txt|webm|ogg|mp4|wav|mp3/;
         const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-        const mimetype = allowedTypes.test(file.mimetype);
-        
-        if (mimetype && extname) {
-            return cb(null, true);
-        }
-        cb(new Error('Only PDF, DOC, DOCX, and TXT files are allowed'));
+        if (extname) return cb(null, true);
+        cb(new Error('File type not allowed'));
     }
 });
 
-// ============================================
-// API Routes
-// ============================================
-
-// Health check
+// ─── Health Check ────────────────────────────────────────────
 app.get('/health', (req, res) => {
     res.json({ status: 'OK', message: 'NextHire backend is running!' });
 });
 
-// Generate interview questions
+// ─── Generate Interview Questions ────────────────────────────
 app.post('/start-interview', upload.single('resume'), async (req, res) => {
     try {
         const { role, experienceLevel } = req.body;
-        
         if (!role || !experienceLevel) {
             return res.status(400).json({ error: 'Role and experience level are required' });
         }
-
         console.log(`📝 Generating questions for ${experienceLevel} ${role}`);
 
-        // Create prompt for Groq
         const prompt = `You are an expert interview coach. Generate exactly 5 highly relevant interview questions for a ${experienceLevel}-level ${role} position.
 
 Requirements:
@@ -84,7 +66,6 @@ Requirements:
 Return ONLY a JSON array of 5 question strings, nothing else. Format:
 ["question 1", "question 2", "question 3", "question 4", "question 5"]`;
 
-        // Call Groq API
         const completion = await groq.chat.completions.create({
             messages: [{ role: 'user', content: prompt }],
             model: 'llama-3.3-70b-versatile',
@@ -94,20 +75,10 @@ Return ONLY a JSON array of 5 question strings, nothing else. Format:
 
         const responseText = completion.choices[0]?.message?.content || '[]';
         const questions = JSON.parse(responseText);
-
         console.log(`✅ Generated ${questions.length} questions`);
 
-        // Clean up uploaded file if exists
-        if (req.file) {
-            fs.unlink(req.file.path, (err) => {
-                if (err) console.error('Error deleting file:', err);
-            });
-        }
-
-        res.json({
-            questions,
-            resumeProcessed: !!req.file
-        });
+        if (req.file) fs.unlink(req.file.path, () => {});
+        res.json({ questions, resumeProcessed: !!req.file });
 
     } catch (error) {
         console.error('❌ Error generating questions:', error);
@@ -115,59 +86,40 @@ Return ONLY a JSON array of 5 question strings, nothing else. Format:
     }
 });
 
-// Transcribe audio (using Groq's Whisper)
+// ─── Transcribe Audio ────────────────────────────────────────
 app.post('/transcribe-audio', upload.single('audio'), async (req, res) => {
     try {
-        if (!req.file) {
-            return res.status(400).json({ error: 'No audio file provided' });
-        }
+        if (!req.file) return res.status(400).json({ error: 'No audio file provided' });
+        console.log(`🎤 Transcribing audio...`);
 
-        console.log(`🎤 Transcribing audio: ${req.file.originalname}`);
-
-        // Use Groq's Whisper model for transcription
         const transcription = await groq.audio.transcriptions.create({
             file: fs.createReadStream(req.file.path),
             model: 'whisper-large-v3',
             response_format: 'json',
         });
 
-        // Clean up audio file
-        fs.unlink(req.file.path, (err) => {
-            if (err) console.error('Error deleting file:', err);
-        });
-
+        fs.unlink(req.file.path, () => {});
         console.log(`✅ Transcription complete`);
-
-        res.json({
-            success: true,
-            text: transcription.text
-        });
+        res.json({ success: true, text: transcription.text });
 
     } catch (error) {
         console.error('❌ Error transcribing audio:', error);
-        
-        // Clean up file on error
-        if (req.file) {
-            fs.unlink(req.file.path, (err) => {});
-        }
-
-        res.status(500).json({ 
-            success: false,
-            error: 'Transcription failed: ' + error.message 
-        });
+        if (req.file) fs.unlink(req.file.path, () => {});
+        res.status(500).json({ success: false, error: 'Transcription failed: ' + error.message });
     }
 });
 
-// Evaluate interview answer
+// ─── Evaluate Answer (Text + Live Interview) ─────────────────
 app.post('/evaluate-answer', async (req, res) => {
     try {
-        const { question, userAnswer } = req.body;
-
+        const { question, userAnswer, videoAnalysis } = req.body;
         if (!question || !userAnswer) {
             return res.status(400).json({ error: 'Question and answer are required' });
         }
-
         console.log(`📊 Evaluating answer for: "${question.substring(0, 50)}..."`);
+        if (videoAnalysis?.hasVideoData) {
+            console.log(`🎥 Video analysis - Eye Contact: ${videoAnalysis.eyeContactPercent}%, Confidence: ${videoAnalysis.confidenceScore}/10`);
+        }
 
         const prompt = `You are an expert interview coach evaluating a candidate's answer. Provide detailed, constructive feedback.
 
@@ -180,6 +132,7 @@ Evaluate this answer and respond with ONLY a JSON object in this exact format (n
   "score": <number 0-10>,
   "goodPoints": ["point 1", "point 2", "point 3"],
   "missingElements": ["element 1", "element 2"],
+  "areasForImprovement": ["area 1", "area 2", "area 3"],
   "improvementAdvice": "detailed advice paragraph"
 }
 
@@ -190,9 +143,8 @@ Scoring criteria:
 - Depth and completeness
 - Professional communication
 
-Be encouraging but honest. Provide 2-4 good points and 1-3 missing elements.`;
+Be encouraging but honest. Provide 2-4 good points, 2-3 missing elements, and 3-4 specific areas for improvement.`;
 
-        // Call Groq API
         const completion = await groq.chat.completions.create({
             messages: [{ role: 'user', content: prompt }],
             model: 'llama-3.3-70b-versatile',
@@ -201,19 +153,43 @@ Be encouraging but honest. Provide 2-4 good points and 1-3 missing elements.`;
         });
 
         let responseText = completion.choices[0]?.message?.content || '{}';
-        
-        // Clean up response if it has markdown code blocks
-        responseText = responseText.trim();
-        if (responseText.startsWith('```json')) {
-            responseText = responseText.replace(/```json\n?/, '').replace(/```$/, '').trim();
-        } else if (responseText.startsWith('```')) {
-            responseText = responseText.replace(/```\n?/, '').replace(/```$/, '').trim();
-        }
+        responseText = responseText.trim()
+            .replace(/^```json\n?/, '').replace(/^```\n?/, '').replace(/```$/, '').trim();
 
         const evaluation = JSON.parse(responseText);
 
-        console.log(`✅ Evaluation complete - Score: ${evaluation.score}/10`);
+        // Add video analysis feedback if present (live interview mode)
+        if (videoAnalysis?.hasVideoData) {
+            evaluation.videoAnalysis = videoAnalysis;
+            evaluation.presentationScore = videoAnalysis.presentationScore;
 
+            const voiceExpressionFeedback = [];
+            if (videoAnalysis.eyeContactPercent >= 70)
+                voiceExpressionFeedback.push("✅ Excellent eye contact - strong engagement with the camera");
+            else if (videoAnalysis.eyeContactPercent >= 50)
+                voiceExpressionFeedback.push("⚠️ Good eye contact, but try to look at the camera more consistently (aim for 70%+)");
+            else
+                voiceExpressionFeedback.push("❌ Eye contact needs improvement - practice looking directly at the camera while speaking");
+
+            if (videoAnalysis.smilePercent >= 30)
+                voiceExpressionFeedback.push("✅ Great energy and enthusiasm - your positive expressions came through well");
+            else if (videoAnalysis.smilePercent >= 15)
+                voiceExpressionFeedback.push("⚠️ Show more enthusiasm - try smiling naturally when discussing achievements");
+            else
+                voiceExpressionFeedback.push("❌ Expression needs work - smile naturally and show enthusiasm for the role");
+
+            if (videoAnalysis.confidenceScore >= 7)
+                voiceExpressionFeedback.push("✅ You projected strong confidence and professional presence");
+            else if (videoAnalysis.confidenceScore >= 5)
+                voiceExpressionFeedback.push("⚠️ Work on appearing more confident - practice your answers and maintain steady eye contact");
+            else
+                voiceExpressionFeedback.push("❌ Confidence level appears low - practice extensively and focus on body language cues");
+
+            evaluation.voiceExpressionFeedback = voiceExpressionFeedback;
+            evaluation.overallScore = Math.round(evaluation.score * 0.6 + videoAnalysis.presentationScore * 0.4);
+        }
+
+        console.log(`✅ Evaluation complete - Score: ${evaluation.score}/10`);
         res.json(evaluation);
 
     } catch (error) {
@@ -222,30 +198,23 @@ Be encouraging but honest. Provide 2-4 good points and 1-3 missing elements.`;
     }
 });
 
-// ============================================
-// Error Handling
-// ============================================
-
+// ─── Error Handler ───────────────────────────────────────────
 app.use((err, req, res, next) => {
     console.error('❌ Server error:', err);
     res.status(500).json({ error: err.message || 'Internal server error' });
 });
 
-// ============================================
-// Start Server
-// ============================================
-
+// ─── Start Server ────────────────────────────────────────────
 app.listen(PORT, () => {
     console.log('\n' + '='.repeat(50));
-    console.log('🚀 NextHire Backend Server Running!');
+    console.log('🚀 NextHire Combined Backend Running!');
     console.log('='.repeat(50));
-    console.log(`📍 Server URL: http://localhost:${PORT}`);
-    console.log(`🏥 Health Check: http://localhost:${PORT}/health`);
+    console.log(`📍 Server URL:    http://localhost:${PORT}`);
+    console.log(`🏥 Health Check:  http://localhost:${PORT}/health`);
     console.log('\n💡 Open NextHire.html in your browser to get started!');
     console.log('🛑 Press Ctrl+C to stop the server\n');
 });
 
-// Graceful shutdown
 process.on('SIGINT', () => {
     console.log('\n👋 Shutting down NextHire server...');
     process.exit(0);
