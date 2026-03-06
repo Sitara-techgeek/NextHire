@@ -10,16 +10,18 @@ const Groq = require('groq-sdk');
 const fs = require('fs');
 const path = require('path');
 
-// Load configuration
-let CONFIG;
-try {
-    CONFIG = require('./config.js');
-    console.log('✅ Configuration loaded successfully');
-} catch (error) {
-    console.error('❌ ERROR: config.js not found!');
-    console.error('📝 Please copy config.template.js to config.js and add your API keys');
+// Load configuration from environment variables
+const CONFIG = {
+    GROQ_API_KEY: process.env.GROQ_API_KEY
+};
+
+if (!CONFIG.GROQ_API_KEY) {
+    console.error('❌ ERROR: GROQ_API_KEY environment variable is not set!');
+    console.error('📝 Please add GROQ_API_KEY to Render environment variables');
     process.exit(1);
 }
+
+console.log('✅ Configuration loaded successfully');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
