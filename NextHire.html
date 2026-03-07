@@ -213,9 +213,12 @@
                 <div class="user-video-container">
                     <video id="userVideo" class="user-video" autoplay muted playsinline></video>
                     <div class="analysis-overlay">
-                        <div>Eye Contact: <span id="eyeMetric">—</span></div>
-                        <div>Confidence: <span id="confMetric">—</span></div>
+                        <div>👁 Eye Contact: <span id="eyeMetric">—</span></div>
+                        <div>😊 Expression: <span id="smileMetric">—</span></div>
+                        <div>📐 Posture: <span id="postureMetric">—</span></div>
+                        <div>🎙 Speaking: <span id="speakingMetric">—</span></div>
                     </div>
+                    <canvas id="analysisCanvas" style="display:none;" width="160" height="90"></canvas>
                     <div class="live-transcript"><span id="transcriptText"></span></div>
                 </div>
                 <div class="live-action-btns">
@@ -322,7 +325,7 @@
 
 <script>
 // ─── CONFIG ───────────────────────────────────────────────────
-const API_URL = 'https://nexthire-8gnr.onrender.com';
+const API_URL = 'http://localhost:3000';
 
 // ─── STATE ────────────────────────────────────────────────────
 let questions   = [];
@@ -463,6 +466,7 @@ document.getElementById('liveModeBtn').addEventListener('click', async function(
         scores      = [];
         evaluations = [];
         liveAnswers = [];
+        videoMetrics = [];
         setAiriStatus('liveStatus', 'Ready!');
         speakAiri('Hello! I am Airi, your AI interviewer. I have prepared some questions for the ' + role + ' position. Lets begin.', 'airiLive', 'liveStatus', function() {
             askLiveQuestion();
@@ -545,6 +549,7 @@ function stopLiveListening() {
 function advanceLiveQuestion() {
     // Save the answer for this question before advancing
     liveAnswers[currentIdx] = liveAnswerText.trim();
+    stopVideoAnalysis(currentIdx);
     stopLiveListening();
     currentIdx++;
     // Brief pause so user sees the transition
@@ -560,8 +565,9 @@ function askLiveQuestion() {
     }
     var q = questions[currentIdx];
     document.getElementById('liveQuestion').textContent = 'Q' + (currentIdx + 1) + ': ' + q;
-    // After Airi finishes speaking the question, start listening
+    // After Airi finishes speaking the question, start listening AND video analysis
     speakAiri(q, 'airiLive', 'liveStatus', function() {
+        startVideoAnalysis(currentIdx);
         startLiveListening();
     });
 }
@@ -599,6 +605,7 @@ async function finishLiveInterview() {
 document.getElementById('skipBtn').addEventListener('click', function() {
     window.speechSynthesis.cancel();
     liveAnswers[currentIdx] = liveAnswerText.trim();
+    stopVideoAnalysis(currentIdx);
     stopLiveListening();
     currentIdx++;
     askLiveQuestion();
@@ -616,6 +623,7 @@ document.getElementById('pauseLiveBtn').addEventListener('click', function() {
 
 document.getElementById('endLiveBtn').addEventListener('click', function() {
     window.speechSynthesis.cancel();
+    stopVideoAnalysis(currentIdx);
     stopLiveListening();
     // Detach video but keep cachedStream alive to avoid re-prompting
     document.getElementById('userVideo').srcObject = null;
@@ -788,47 +796,282 @@ function stopRecording() {
     btn.className = btn.className.replace('btn-danger', 'btn-secondary');
 }
 
-// ─── RESULTS ──────────────────────────────────────────────────
+// ─── REAL-TIME VIDEO ANALYSIS ENGINE ─────────────────────────
+//
+// Samples frames from the webcam every 800ms while the user answers.
+// Computes 4 real metrics per frame using canvas pixel analysis:
+//
+//  1. EYE CONTACT  — measures how much brightness is concentrated in the
+//     upper-centre of the frame (where the camera lens is).  A face looking
+//     straight ahead keeps bright skin-tone pixels near the top-centre;
+//     looking down or away shifts them downward / to the sides.
+//
+//  2. EXPRESSION   — compares the average brightness of the lower-face
+//     region (mouth area) to the mid-face region.  A genuine smile lifts
+//     cheek muscles and raises local brightness slightly in that zone.
+//
+//  3. POSTURE      — detects how centred and stable the bright region
+//     (face) is horizontally.  Consistent drift to one side or very large
+//     horizontal variance signals leaning / not facing the camera.
+//
+//  4. MOTION       — measures mean absolute pixel difference between
+//     consecutive frames.  Very high motion = fidgeting.
+//     Very low motion late in the answer = not speaking / frozen.
+//
+// All raw per-frame samples are stored in videoMetrics[qIdx] and
+// summarised at the end of each question into a VideoSummary object
+// that drives data-specific tips — no static rotation.
 
-// Presentation / delivery tips — rotated per question so they feel varied.
-// For video mode we include camera-specific guidance.
-var EYE_TIPS = [
-    '👁️ Maintain steady eye contact with the camera — it signals confidence to your interviewer.',
-    '👁️ Look directly into the camera lens, not at your own image on screen.',
-    '👁️ Position your camera at eye level for a natural, confident gaze.',
-    '👁️ Avoid glancing down at notes too often — practise key points so your eyes stay on the camera.',
-    '👁️ Natural blinking is fine, but long downward gazes can appear evasive to interviewers.'
-];
-var POSTURE_TIPS = [
-    '📐 Sit up straight with your back supported — good posture projects authority.',
-    '💡 Make sure your face is well-lit from the front; avoid sitting with a window behind you.',
-    '🖼️ Keep yourself centred in the frame with a clean, uncluttered background if possible.',
-    '👔 Dress professionally from the waist up — it affects how confident you feel as well as how you appear.',
-    '🎙️ Speak at a measured pace. Brief pauses between points give your words more weight.'
-];
-var CALM_TIPS_LO  = [
-    '😌 You may have sounded rushed — take a slow breath before answering and let your words land.',
-    '🧘 Nervousness is very normal. Try box-breathing (in 4s, hold 4s, out 4s) before your next interview.',
-    '💬 Slow down slightly and use deliberate pauses; it makes you sound more assured, not less prepared.'
-];
-var CALM_TIPS_MID = [
-    '😊 Good composure overall. Keep your shoulders relaxed and avoid rapid or darting head movements.',
-    '🌿 You stayed fairly calm — keep channelling that energy in future rounds.'
-];
-var CALM_TIPS_HI  = [
-    '🌟 You came across as confident and relaxed — that positive energy resonates strongly with interviewers!',
-    '💪 Excellent composure. Your steady delivery helped your answers land with impact.'
-];
+var videoMetrics    = [];   // array of per-question raw sample arrays
+var _vSamples       = [];   // accumulator for current question
+var _vTimer         = null; // setInterval handle
+var _prevPixels     = null; // previous frame pixel data for motion diff
+var _speakSamples   = [];   // 1/0 per frame: was user speaking?
 
-function getPresentationTips(score, qIdx, isLive) {
-    var tips = [];
-    if (isLive) {
-        tips.push(EYE_TIPS[qIdx % EYE_TIPS.length]);
+function startVideoAnalysis(qIdx) {
+    _vSamples   = [];
+    _speakSamples = [];
+    _prevPixels = null;
+    videoMetrics[qIdx] = null; // will be filled on stop
+
+    var video  = document.getElementById('userVideo');
+    var canvas = document.getElementById('analysisCanvas');
+    var ctx    = canvas.getContext('2d');
+    var W = canvas.width, H = canvas.height;
+
+    _vTimer = setInterval(function() {
+        if (!video || video.readyState < 2) return;
+        ctx.drawImage(video, 0, 0, W, H);
+        var data = ctx.getImageData(0, 0, W, H).data;
+
+        // ── Compute metrics ──────────────────────────────────
+        var sample = analyseFrame(data, W, H);
+
+        // Motion vs previous frame
+        if (_prevPixels) {
+            var diff = 0;
+            for (var i = 0; i < data.length; i += 4) {
+                diff += Math.abs(data[i] - _prevPixels[i]) +
+                        Math.abs(data[i+1] - _prevPixels[i+1]) +
+                        Math.abs(data[i+2] - _prevPixels[i+2]);
+            }
+            sample.motion = diff / (W * H * 3);
+        } else {
+            sample.motion = 0;
+        }
+        _prevPixels = new Uint8ClampedArray(data);
+
+        // Is user currently speaking? (check liveAnswerText growth)
+        sample.speaking = liveListening && liveAnswerText.trim().length > 0;
+        _speakSamples.push(sample.speaking ? 1 : 0);
+
+        _vSamples.push(sample);
+
+        // ── Update live overlay ───────────────────────────────
+        updateLiveOverlay(sample);
+
+    }, 800);
+}
+
+function stopVideoAnalysis(qIdx) {
+    clearInterval(_vTimer);
+    _vTimer = null;
+
+    if (_vSamples.length > 0) {
+        videoMetrics[qIdx] = summariseSamples(_vSamples, _speakSamples);
     }
-    if (score < 6)      { tips.push(CALM_TIPS_LO[qIdx  % CALM_TIPS_LO.length]); }
-    else if (score < 8) { tips.push(CALM_TIPS_MID[qIdx % CALM_TIPS_MID.length]); }
-    else                { tips.push(CALM_TIPS_HI[qIdx  % CALM_TIPS_HI.length]); }
-    tips.push(POSTURE_TIPS[qIdx % POSTURE_TIPS.length]);
+    // Clear overlay
+    ['eyeMetric','smileMetric','postureMetric','speakingMetric']
+        .forEach(function(id){ var el=document.getElementById(id); if(el) el.textContent='—'; });
+}
+
+function analyseFrame(data, W, H) {
+    // Divide frame into zones: top-centre, mid-face, lower-face, full
+    var topCX  = { x0: W*0.3, x1: W*0.7, y0: 0,      y1: H*0.35 }; // upper-centre (camera region)
+    var midFace= { x0: W*0.2, x1: W*0.8, y0: H*0.25, y1: H*0.55 }; // mid-face (eyes/nose)
+    var lowFace= { x0: W*0.25,x1: W*0.75,y0: H*0.5,  y1: H*0.75 }; // lower-face (mouth)
+    var leftH  = { x0: 0,     x1: W*0.35,y0: H*0.1,  y1: H*0.7  }; // left half
+    var rightH = { x0: W*0.65,x1: W,     y0: H*0.1,  y1: H*0.7  }; // right half
+
+    function zoneBrightness(z) {
+        var sum = 0, cnt = 0;
+        for (var y = Math.floor(z.y0); y < Math.floor(z.y1); y++) {
+            for (var x = Math.floor(z.x0); x < Math.floor(z.x1); x++) {
+                var idx = (y * W + x) * 4;
+                // Perceptual brightness
+                sum += 0.299*data[idx] + 0.587*data[idx+1] + 0.114*data[idx+2];
+                cnt++;
+            }
+        }
+        return cnt > 0 ? sum / cnt : 0;
+    }
+
+    // Weighted skin-tone detector (rough): pixels where R>100 & R>G & R>B & not too dark
+    function skinRatio(z) {
+        var skin = 0, total = 0;
+        for (var y = Math.floor(z.y0); y < Math.floor(z.y1); y += 2) {
+            for (var x = Math.floor(z.x0); x < Math.floor(z.x1); x += 2) {
+                var idx = (y * W + x) * 4;
+                var r = data[idx], g = data[idx+1], b = data[idx+2];
+                total++;
+                if (r > 80 && r > g && r > b && (r - g) > 15 && (r - b) > 20) skin++;
+            }
+        }
+        return total > 0 ? skin / total : 0;
+    }
+
+    var bTopC  = zoneBrightness(topCX);
+    var bMid   = zoneBrightness(midFace);
+    var bLow   = zoneBrightness(lowFace);
+    var bLeft  = zoneBrightness(leftH);
+    var bRight = zoneBrightness(rightH);
+    var skinTop= skinRatio(topCX);
+    var skinMid= skinRatio(midFace);
+
+    // Eye-contact score: skin/brightness in upper-centre relative to full face
+    // High skinTop + high bTopC = face is centred & looking up at camera
+    var eyeScore = Math.min(1, (skinTop * 3 + (bTopC / Math.max(bMid, 1)) * 0.4));
+
+    // Expression score: lower-face brightness relative to mid-face
+    // Smiling slightly raises lower-face brightness vs neutral
+    var exprScore = Math.min(1, Math.max(0, (bLow / Math.max(bMid, 1) - 0.75) * 4));
+
+    // Posture score: how symmetric (balanced left/right brightness)
+    var symm = 1 - Math.min(1, Math.abs(bLeft - bRight) / Math.max(bLeft + bRight, 1) * 4);
+    // Penalise if face (skin) is very low in frame (slouching)
+    var postureScore = Math.min(1, symm * (0.6 + skinTop * 2));
+
+    return {
+        eyeScore:    eyeScore,
+        exprScore:   exprScore,
+        postureScore:postureScore,
+        bTopC: bTopC, bMid: bMid, skinTop: skinTop
+    };
+}
+
+function summariseSamples(samples, speakSamples) {
+    var n = samples.length;
+    if (n === 0) return null;
+
+    var sumEye=0, sumExpr=0, sumPost=0, sumMot=0, lowEyeFrames=0, highMotFrames=0;
+    samples.forEach(function(s) {
+        sumEye  += s.eyeScore;
+        sumExpr += s.exprScore;
+        sumPost += s.postureScore;
+        sumMot  += (s.motion || 0);
+        if (s.eyeScore < 0.35) lowEyeFrames++;
+        if ((s.motion || 0) > 18) highMotFrames++;
+    });
+
+    var speakCount = speakSamples.filter(Boolean).length;
+
+    return {
+        eyePct:      Math.round(sumEye  / n * 100),   // 0-100
+        exprPct:     Math.round(sumExpr / n * 100),   // 0-100
+        posturePct:  Math.round(sumPost / n * 100),   // 0-100
+        avgMotion:   Math.round(sumMot  / n),          // raw pixel diff
+        lookAwayPct: Math.round(lowEyeFrames / n * 100),
+        fidgetPct:   Math.round(highMotFrames / n * 100),
+        speakPct:    Math.round(speakCount / Math.max(n,1) * 100),
+        frameCount:  n
+    };
+}
+
+function updateLiveOverlay(s) {
+    function label(v, lo, hi) {
+        return v >= hi ? '✅ Good' : v >= lo ? '⚠ Fair' : '❌ Low';
+    }
+    var eye = document.getElementById('eyeMetric');
+    var sml = document.getElementById('smileMetric');
+    var pos = document.getElementById('postureMetric');
+    var spk = document.getElementById('speakingMetric');
+    if (eye) eye.textContent = label(s.eyeScore, 0.35, 0.55);
+    if (sml) sml.textContent = label(s.exprScore, 0.25, 0.5);
+    if (pos) pos.textContent = label(s.postureScore, 0.45, 0.65);
+    if (spk) spk.textContent = liveListening ? (liveAnswerText.trim().length > 3 ? '🎤 Active' : '👂 Waiting') : '—';
+}
+
+// ─── DATA-DRIVEN PRESENTATION TIPS ───────────────────────────
+//
+// Reads the VideoSummary for this question and generates ONLY tips
+// that address what was actually observed to be wrong.
+// Text-mode (no videoData) falls back to answer-score-based delivery tips.
+
+function getPresentationTips(answerScore, qIdx, isLive) {
+    // TEXT MODE — generic delivery tips based only on answer score
+    if (!isLive) {
+        if (answerScore < 5)  return ['💬 Try structuring your answer using the STAR method: Situation, Task, Action, Result.'];
+        if (answerScore < 7)  return ['💡 Good effort — adding a specific measurable result to your example will strengthen your answer.'];
+        return ['✅ Strong answer. Keep that level of detail and specificity in future responses.'];
+    }
+
+    var vm = videoMetrics[qIdx];
+
+    // If video analysis failed or produced too few frames, fall back gracefully
+    if (!vm || vm.frameCount < 3) {
+        return ['📷 Not enough video data was captured for this question to generate camera tips.'];
+    }
+
+    var tips = [];
+
+    // ── Eye Contact ───────────────────────────────────────────
+    if (vm.eyePct < 35) {
+        tips.push('👁️ Your eye contact was quite low this answer (' + vm.eyePct + '% of frames). ' +
+                  'Practise looking directly into the camera lens — not at your own image on screen. ' +
+                  'Put a sticky note next to your webcam as a visual reminder.');
+    } else if (vm.eyePct < 55) {
+        tips.push('👁️ Eye contact was moderate (' + vm.eyePct + '%). ' +
+                  'Try to hold your gaze on the camera for longer stretches, especially when making key points.');
+    } else {
+        tips.push('👁️ Great eye contact (' + vm.eyePct + '%)! You maintained a steady, confident gaze throughout.');
+    }
+
+    // ── Expression / Engagement ───────────────────────────────
+    if (vm.exprPct < 25) {
+        tips.push('😐 Your expression appeared quite flat or neutral this question. ' +
+                  'Interviewers respond well to natural enthusiasm — let a slight smile come through when ' +
+                  'you\'re describing achievements or things you enjoy about your work.');
+    } else if (vm.exprPct < 50) {
+        tips.push('😊 Decent expression. Allowing yourself to smile slightly more when discussing strengths ' +
+                  'or positive outcomes will convey more energy and confidence to the interviewer.');
+    } else {
+        tips.push('😊 Your expression showed good energy and engagement — that positive presence is noticeable on camera.');
+    }
+
+    // ── Posture / Centering ───────────────────────────────────
+    if (vm.posturePct < 40) {
+        tips.push('📐 Your posture or camera framing needs attention. You appeared off-centre or were leaning. ' +
+                  'Sit upright with your back supported, position your camera at eye level, and centre ' +
+                  'yourself in the frame for a more authoritative presence.');
+    } else if (vm.posturePct < 60) {
+        tips.push('📐 Posture was mostly good. Watch for moments of leaning — staying squarely centred ' +
+                  'in the frame reinforces your confidence throughout the answer.');
+    }
+    // (No tip if posture was good — only flag real issues)
+
+    // ── Motion / Fidgeting ────────────────────────────────────
+    if (vm.fidgetPct > 40) {
+        tips.push('🤚 There was quite a bit of movement detected (' + vm.fidgetPct + '% of frames). ' +
+                  'Excess fidgeting — touching your face, adjusting your collar, or swaying — ' +
+                  'signals nervousness. Rest your hands in your lap or on the desk to appear more composed.');
+    } else if (vm.fidgetPct > 20) {
+        tips.push('🤚 Slight fidgeting detected. Try to keep your hands still when not gesturing intentionally — ' +
+                  'purposeful gestures are great, but restless movement is distracting.');
+    }
+
+    // ── Silent / Non-speaking periods ────────────────────────
+    if (vm.speakPct < 50) {
+        tips.push('🎙️ You appeared to be silent for a significant portion of this answer. ' +
+                  'Long silences can suggest uncertainty. It\'s fine to pause briefly to collect your thoughts, ' +
+                  'but try to keep your answer flowing — use transitional phrases like "What this meant was…" ' +
+                  'to bridge any gaps.');
+    }
+
+    // Guarantee at least one positive note if everything was strong
+    if (tips.length === 0) {
+        tips.push('🌟 Excellent camera presence this answer — strong eye contact, good posture, and natural expression. Keep it up!');
+    }
+
     return tips;
 }
 
@@ -837,7 +1080,7 @@ function buildFeedbackItem(ev, qIdx, isLive) {
     var scoreCls = score >= 7 ? 'score-hi' : score >= 5 ? 'score-mid' : 'score-lo';
     var qText = questions[qIdx] || ('Question ' + (qIdx + 1));
 
-    // Presentation tips block
+    // Presentation tips block — data-driven for live mode
     var tips = getPresentationTips(score, qIdx, isLive);
     var pTitle = isLive ? '🎥 Camera & Presentation Tips' : '💡 Delivery Tips';
     var tipsHtml = '<div class="fb-presentation"><div class="pt-title">' + pTitle + '</div><ul>' +
