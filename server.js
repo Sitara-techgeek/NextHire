@@ -32,6 +32,11 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('.'));
 
+// Serve NextHire.html at root URL
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'NextHire.html'));
+});
+
 const upload = multer({
     dest: 'uploads/',
     limits: { fileSize: 10 * 1024 * 1024 },
@@ -41,11 +46,6 @@ const upload = multer({
         if (extname) return cb(null, true);
         cb(new Error('File type not allowed'));
     }
-});
-
-// ─── Serve Frontend ─────────────────────────────────────────
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'NextHire.html'));
 });
 
 // ─── Health Check ────────────────────────────────────────────
